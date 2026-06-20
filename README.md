@@ -15,7 +15,7 @@
 | Discussion comments | ❌ | ✅ |
 | Output as `.txt` | ❌ | ✅ |
 | Output as `.json` | ❌ | ✅ |
-| JS popup bypassed | ✅ | ✅ |
+| JS popup bypassed | ❌ | ✅ |
 | Questions sorted in order | ❌ | ✅ |
 
 ---
@@ -148,7 +148,7 @@ examtopics/
 
 ## Credits
 
-Core scraper, Camoufox integration, HTTP client, caching, and popup suppression by [swarnava-dutta](https://github.com/swarnava-dutta/Free-Exam-Dumps). This repo adds question parsing, answer extraction, and structured output on top of that foundation.
+Core scraper, Camoufox integration, HTTP client and caching by [swarnava-dutta](https://github.com/swarnava-dutta/Free-Exam-Dumps). This repo adds question parsing, answer extraction, popup suppression and structured output on top of that foundation.
 
 ---
 
