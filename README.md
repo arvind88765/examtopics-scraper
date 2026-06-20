@@ -118,6 +118,13 @@ Cache is stored in `.examtopics_cache` for 6 hours. Re-running within that windo
 
 ---
 
+## Video Guide
+
+https://github.com/user-attachments/assets/1556fafd-1d11-4389-bd8b-1f1b2ec0babc
+
+
+
+
 ## Project structure
 
 ```
