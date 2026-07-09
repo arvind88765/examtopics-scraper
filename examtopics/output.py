@@ -1,4 +1,4 @@
-"""examtopics/output.py — replace the existing file with this"""
+
 import json
 from typing import Dict, List
 
