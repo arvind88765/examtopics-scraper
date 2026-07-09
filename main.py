@@ -2,12 +2,6 @@ from pathlib import Path
 
 from tqdm import tqdm
 
-from examtopics.output import (
-    write_grouped_links_to_file,
-    write_questions_to_csv,
-    write_questions_to_json,
-    write_questions_to_txt,
-)
 from examtopics.browser_scraper import CamoufoxScraper
 from examtopics.cache import HtmlCache
 from examtopics.fast_scanner import FastDiscussionScanner
