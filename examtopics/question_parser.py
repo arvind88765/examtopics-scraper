@@ -1,7 +1,4 @@
-"""
-Drop this into examtopics/question_parser.py
-Parses a single ExamTopics discussion page into structured data.
-"""
+
 import re
 from html import unescape
 from typing import Dict, List, Optional
@@ -19,7 +16,7 @@ def parse_question_page(html: str, url: str = "") -> Dict:
     {
         "url": str,
         "question_no": str,          # e.g. "Topic 1 / Question 23"
-        "question": str,
+        "question": str,             # question text only, options stripped out
         "options": {"A": "...", "B": "...", ...},
         "most_voted": str,           # e.g. "B"
         "vote_counts": {"A": 5, "B": 12, ...},
@@ -42,7 +39,21 @@ def parse_question_page(html: str, url: str = "") -> Dict:
         or soup.select_one(".question-text")
     )
     if q_body:
-        result["question"] = _clean(q_body.get_text(" "))
+        # Work on a copy so we don't disturb the original soup (options are
+        # parsed from `soup` separately below and must stay intact there).
+        # This is the fix for the "question field contains options" issue:
+        # strip out option/answer elements BEFORE extracting question text.
+        q_body_copy = BeautifulSoup(str(q_body), "html.parser")
+        for junk in q_body_copy.select(
+            "li.multi-choice-item, ul, ol, .multi-choice-letter, "
+            ".answer, .options, .vote-button, .answer-vote-button"
+        ):
+            junk.decompose()
+        question_text = _clean(q_body_copy.get_text(" "))
+        # Strip trailing site boilerplate button text that leaks in
+        # regardless of which element it's actually wrapped in.
+        question_text = re.sub(r"\s*Show Suggested Answer\s*$", "", question_text, flags=re.I).strip()
+        result["question"] = question_text
     else:
         result["question"] = ""
 
