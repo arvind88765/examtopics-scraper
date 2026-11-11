@@ -24,7 +24,7 @@
 
 ExamTopics shows a JS popup after a few page views that locks the content and kicks you back to page 1. Since this scraper fetches pages over raw HTTP without running JavaScript, that popup never triggers and the HTML comes back clean.
 
-It scans all discussion listing pages for your provider in parallel, filters the ones matching your exam code, then fetches each question page one by one. Vote counts are hidden behind a login wall, so the scraper reads all discussion comments and counts `Selected Answer: X` mentions to figure out the most accepted answer. Everything gets saved sorted by question number.
+It scans discussion listing pages with one worker by default, filters the ones matching your exam code, then fetches each question page one by one. Vote counts are hidden behind a login wall, so the scraper reads all discussion comments and counts `Selected Answer: X` mentions to figure out the most accepted answer. Everything gets saved sorted by question number.
 
 ---
 
@@ -60,6 +60,37 @@ It will ask you two things:
 **Exam code** - the exam slug. Examples: `CIS-CSM`, `AIF-C01`, `FCP-FAZ-AN-7-6`, `DOP-C02`
 
 After that it runs on its own. No more input needed.
+
+### Pacing and rate limits
+
+Normal runs are deliberately slower: uncached HTTP requests to the same host are spaced
+3–6 seconds apart, including question downloads and retries. Increasing listing
+workers does not bypass the shared host pacing. Cache hits return immediately.
+
+HTTP 429 triggers a shared cooldown across HTTP/browser fetchers. Local backoff
+starts at 30 seconds and doubles to a 120-second cap, plus small positive jitter.
+A valid `Retry-After` seconds value or HTTP date can require a longer wait and is
+never shortened to that cap. Defaults are configurable in `examtopics/settings.py`.
+There are still three attempts; persistent 429 stops the phase, without switching
+to a browser to evade the limit. The final response also sets a host cooldown.
+
+Browser fallback paces explicit top-level page navigations before `goto`, outside
+the navigation timeout. Assets, iframe requests and automatic redirect hops are
+not individually paced. Subresource 429 responses update the responding host's
+shared cooldown without blocking event callbacks; subsequent explicit navigations
+to that host wait for it. A final navigation 429, including after redirects, uses
+the same retry/exhaustion policy. Already-running asset requests are not recalled.
+
+### Partial runs
+
+The console reports completed, failed and not-attempted pages/questions. A failed
+initial page-count request leaves the remaining page count unknown, not zero.
+An incomplete scan saves collected links as `EXAM dumps.partial.txt` and does not
+start question downloads or claim there were no matches. A failed question phase
+saves successful questions as `EXAM partial questions.txt` and `.json`, and keeps
+the discovered links in `EXAM dumps.partial.txt`. Empty partial results never
+replace existing outputs; partial filenames do not replace complete filenames.
+Partial files describe this run, not a merged checkpoint across runs.
 
 ---
 
@@ -114,7 +145,12 @@ Upload the `.json` file to [quiz-three-orcin.vercel.app](https://quiz-three-orci
 
 Only free public questions get scraped. Questions locked behind contributor access come back empty - that is ExamTopics paywall, not a bug.
 
-Cache is stored in `.examtopics_cache` for 6 hours. Re-running within that window skips re-fetching pages. Delete the folder to force a fresh scrape.
+Successful HTTP HTML is cached in `.examtopics_cache` for 6 hours, even when a later
+request fails. Re-running within that TTL reuses cached pages, but scans again and
+rebuilds outputs: this is cache reuse, **not exact checkpoint resume**. Expired or
+uncached pages require network requests again. Browser fallback HTML is not stored
+in this HTTP cache. Cooldowns are shared within the running process, not persisted
+across restarts; respect server limits before restarting.
 
 ---
 
@@ -132,7 +168,7 @@ run_scraper.bat
 install_dependencies.bat
 main.py
 examtopics/
-  fast_scanner.py       - parallel listing scan (64 workers)
+  fast_scanner.py       - bounded listing scan (one worker by default)
   browser_scraper.py    - Camoufox fallback for blocked pages
   question_parser.py    - parses question pages into structured data
   http_client.py        - HTTP with retry and connection pooling
