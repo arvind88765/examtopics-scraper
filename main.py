@@ -5,7 +5,7 @@ from tqdm import tqdm
 from examtopics.browser_scraper import CamoufoxScraper
 from examtopics.cache import HtmlCache
 from examtopics.fast_scanner import FastDiscussionScanner
-from examtopics.http_client import HttpFetcher
+from examtopics.http_client import HttpFetcher, SHARED_COORDINATOR, RateLimitError, ScanIncomplete
 from examtopics.matching import build_page_numbers, display_slug, extract_topic_question, normalize_provider
 from examtopics.output import (
     write_grouped_links_to_file,
@@ -56,7 +56,9 @@ def print_header():
 
 def scrape_links_only():
     provider, exam_code, cache = _get_common_inputs()
-    links = scan_discussion_links(provider, exam_code, cache)
+    links, incomplete = scan_for_output(provider, exam_code, cache)
+    if incomplete:
+        return
     filename = f"{display_slug(exam_code).upper()} dumps.txt"
     print(f"\nYour file will be named: {filename}")
     write_grouped_links_to_file(filename, links)
@@ -65,7 +67,11 @@ def scrape_links_only():
 
 def scrape_with_questions():
     provider, exam_code, cache = _get_common_inputs()
-    links = scan_discussion_links(provider, exam_code, cache)
+    links, incomplete = scan_for_output(provider, exam_code, cache)
+    if incomplete:
+        print("Question phase not attempted because the listing scan is incomplete.")
+        print(f"Questions: completed=0, failed=0, not attempted={len(links)} discovered links; additional links unknown.")
+        return
 
     if not links:
         print("No links found.")
@@ -86,19 +92,34 @@ def scrape_with_questions():
                 html = fetcher.fetch_html(url)
                 q = parse_question_page(html, url=url)
                 questions.append(q)
+            except RateLimitError as exc:
+                failed += 1
+                tqdm.write(f"Stopping question phase: {exc}")
+                pbar.update(1)
+                break
             except Exception as exc:
                 failed += 1
                 tqdm.write(f"✗ {url} — {exc}")
             pbar.update(1)
 
     slug = display_slug(exam_code).upper()
+    not_attempted = len(links) - len(questions) - failed
+    partial = failed > 0 or not_attempted > 0
+    print(f"\nQuestions: completed={len(questions)}, failed={failed}, not attempted={not_attempted}")
+    if partial:
+        if links:
+            write_grouped_links_to_file(f"{slug} dumps.partial.txt", links)
+        slug += " partial"
+    if not questions:
+        print("No questions saved; existing question outputs were left unchanged.")
+        return
     txt_file  = f"{slug} questions.txt"
     json_file = f"{slug} questions.json"
 
     write_questions_to_txt(txt_file, questions)
     write_questions_to_json(json_file, questions)
 
-    print(f"\nDone! {len(questions)} questions saved.")
+    print(f"\n{'Partial output:' if partial else 'Done!'} {len(questions)} questions saved.")
     print(f"  → {txt_file}")
     print(f"  → {json_file}")
 
@@ -125,7 +146,24 @@ def build_fetcher(cache: HtmlCache) -> HttpFetcher:
         retries=DEFAULT_RETRIES,
         cache=cache,
         refresh_cache=False,
+        coordinator=SHARED_COORDINATOR,
     )
+
+
+def scan_for_output(provider, exam_code, cache):
+    try:
+        return scan_discussion_links(provider, exam_code, cache), False
+    except ScanIncomplete as exc:
+        remaining = exc.not_attempted if exc.not_attempted is not None else "unknown (page count unavailable)"
+        print(f"\nIncomplete listing scan: {exc}")
+        print(f"Pages: completed={exc.completed}, failed={exc.failed}, not attempted={remaining}")
+        if exc.links:
+            filename = f"{display_slug(exam_code).upper()} dumps.partial.txt"
+            write_grouped_links_to_file(filename, exc.links)
+            print(f"Saved {len(exc.links)} collected links to {filename}; scan is NOT complete.")
+        else:
+            print("No links collected; existing output files were left unchanged.")
+        return exc.links, True
 
 
 def scan_discussion_links(provider: str, exam_code: str, cache: HtmlCache):
@@ -135,6 +173,8 @@ def scan_discussion_links(provider: str, exam_code: str, cache: HtmlCache):
         page_numbers = build_page_numbers(total_pages, 1, None, None)
         print(f"\nScanning Pages: {page_numbers[0]}-{page_numbers[-1]} ({len(page_numbers)} pages)")
         return scanner.scan(page_numbers, exam_code, workers=DEFAULT_REQUEST_WORKERS)
+    except ScanIncomplete:
+        raise
     except Exception as exc:
         print(f"Fast scan failed; falling back to Camoufox: {exc}")
 
@@ -144,6 +184,7 @@ def scan_discussion_links(provider: str, exam_code: str, cache: HtmlCache):
         timeout_ms=DEFAULT_TIMEOUT_MS,
         retries=DEFAULT_RETRIES,
         delay_range=DEFAULT_DELAY_RANGE,
+        coordinator=SHARED_COORDINATOR,
     ) as scraper:
         total_pages = scraper.get_num_pages()
         page_numbers = build_page_numbers(total_pages, 1, None, None)

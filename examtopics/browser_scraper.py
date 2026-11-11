@@ -1,5 +1,4 @@
 import os
-import random
 import sys
 import time
 from pathlib import Path
@@ -8,6 +7,7 @@ from typing import List, Optional, Sequence, Tuple
 from tqdm import tqdm
 
 from .cleaner import clean_examtopics_html
+from .http_client import SHARED_COORDINATOR, RateLimitError, ScanIncomplete
 from .matching import (
     dedupe,
     discussion_entry_url,
@@ -48,6 +48,7 @@ class CamoufoxScraper:
         timeout_ms: int = DEFAULT_TIMEOUT_MS,
         retries: int = DEFAULT_RETRIES,
         delay_range: Tuple[float, float] = DEFAULT_DELAY_RANGE,
+        coordinator=None,
     ):
         self.provider = normalize_provider(provider)
         self.base_url = provider_discussion_url(self.provider) if self.provider else ""
@@ -55,6 +56,8 @@ class CamoufoxScraper:
         self.timeout_ms = timeout_ms
         self.retries = retries
         self.delay_range = delay_range
+        self.coordinator = coordinator or SHARED_COORDINATOR
+        self._attempt = 1
         self._manager = None
         self.browser = None
         self.context = None
@@ -83,6 +86,7 @@ class CamoufoxScraper:
         self.page = self.context.new_page()
         self.page.set_default_timeout(self.timeout_ms)
         self.page.route("**/*", self._route_request)
+        self.page.on("response", self._observe_response)
         return self
 
     def __exit__(self, exc_type, exc, tb):
@@ -94,9 +98,17 @@ class CamoufoxScraper:
     def fetch_html(self, url: str, *, wait_selector: Optional[str] = None) -> str:
         last_error = None
         for attempt in range(1, self.retries + 1):
+            self._attempt = attempt
+            # Cooldowns must finish outside Playwright's navigation timeout.
+            self.coordinator.wait(url, attempt)
             try:
                 response = self.page.goto(url, wait_until="domcontentloaded", timeout=self.timeout_ms)
-                status = response.status if response else None
+                status = response.status if response is not None else None
+                if status == 429:
+                    self.coordinator.rate_limited(response.url, attempt, response.headers.get("retry-after"))
+                    if attempt == self.retries:
+                        raise RateLimitError(f"HTTP 429 exhausted {self.retries} attempts: {url}")
+                    continue
                 if status and status >= 500:
                     raise RuntimeError(f"HTTP {status}")
 
@@ -115,6 +127,8 @@ class CamoufoxScraper:
                 html = self.page.content()
                 raise_if_blocked(html)
                 return html
+            except RateLimitError:
+                raise
             except (PlaywrightError, RuntimeError, TimeoutError) as exc:
                 last_error = exc
                 if attempt < self.retries:
@@ -134,16 +148,28 @@ class CamoufoxScraper:
             if matches_discussion_entry(text, href, search_string):
                 links.append(discussion_entry_url(text, href))
 
-        self._sleep_between_pages()
         return dedupe(links)
 
     def get_discussion_links(self, page_numbers: Sequence[int], search_string: str) -> List[str]:
         links = []
-        for page_number in tqdm(list(page_numbers), desc="Fetching Links", unit="page"):
+        pages = list(page_numbers)
+        completed = failed = 0
+        for page_number in tqdm(pages, desc="Fetching Links", unit="page"):
             try:
                 links.extend(self.fetch_page_links(page_number, search_string))
+                completed += 1
+            except RateLimitError as exc:
+                exc.links = dedupe(links)
+                exc.completed = completed
+                exc.failed = failed + 1
+                exc.not_attempted = len(pages) - completed - failed - 1
+                raise
             except Exception as exc:
+                failed += 1
                 print(f"\nError on page {page_number}: {exc}")
+        if failed:
+            raise ScanIncomplete("Some browser listing pages failed", links=dedupe(links),
+                                 completed=completed, failed=failed, not_attempted=0)
         return dedupe(links)
 
     def save_clean_discussion_page(self, url: str, output_dir: Path) -> Path:
@@ -161,10 +187,20 @@ class CamoufoxScraper:
             return
         route.continue_()
 
-    def _sleep_between_pages(self):
-        low, high = self.delay_range
-        if high > 0:
-            time.sleep(random.uniform(max(low, 0), max(high, low)))
+    def _observe_response(self, response):
+        """Record resource cooldowns without blocking or raising through callbacks."""
+        try:
+            if response.status != 429:
+                return
+            if (response.request.is_navigation_request()
+                    and response.frame == self.page.main_frame):
+                # goto handles the final top-level response, including redirects.
+                return
+            self.coordinator.rate_limited(
+                response.url, self._attempt, response.headers.get("retry-after"),
+            )
+        except Exception as exc:
+            print(f"Could not observe browser resource rate limit: {exc}")
 
     def _remove_popup(self):
         self.page.evaluate(
